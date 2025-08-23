@@ -1,10 +1,14 @@
 # ruff: noqa: ERA001, E501
 """Base settings to build other settings files upon."""
 
-
+import re
 from pathlib import Path
 
 import environ
+from dotenv import load_dotenv
+from inertia.settings import settings as inertia_settings
+
+load_dotenv()
 
 BASE_DIR = Path(__file__).resolve(strict=True).parent.parent.parent
 # core/
@@ -49,7 +53,7 @@ LOCALE_PATHS = [str(BASE_DIR / "locale")]
 DATABASES = {"default": env.db("DATABASE_URL")}
 DATABASES["default"]["ATOMIC_REQUESTS"] = True
 # https://docs.djangoproject.com/en/stable/ref/settings/#std:setting-DEFAULT_AUTO_FIELD
-DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+DEFAULT_AUTO_FIELD = "django.db.models.UUIDField"
 
 # URLS
 # ------------------------------------------------------------------------------
@@ -76,8 +80,12 @@ THIRD_PARTY_APPS = [
     "crispy_bootstrap5",
     "allauth",
     "allauth.account",
+    "allauth.idp.oidc",
     "allauth.mfa",
     "allauth.socialaccount",
+    "django_vite",
+    "inertia",
+    "storages",
 ]
 
 LOCAL_APPS = [
@@ -140,7 +148,27 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
+    "inertia.middleware.InertiaMiddleware",
+    "config.middleware.DataShareMiddleware",
 ]
+
+# DJANGO_VITE
+DJANGO_VITE = {
+    "default": {
+        "dev_mode": DEBUG,
+        "dev_server_host": env.str("DJANGO_VITE_DEV_SERVER_HOST", default="localhost"),
+        "dev_server_port": env.int("DJANGO_VITE_DEV_SERVER_PORT", default=5173),
+        "manifest_path": str(BASE_DIR / "frontend" / "dist" / "manifest.json"),
+    },
+}
+DJANGO_VITE_ASSETS_PATH = BASE_DIR / "frontend" / "dist"
+
+
+# inertia-django settings
+INERTIA_LAYOUT = "inertia_base.html"  # update with your base template name
+INERTIA_SSR_URL = inertia_settings.INERTIA_SSR_URL
+INERTIA_SSR_ENABLED = inertia_settings.INERTIA_SSR_ENABLED
+INERTIA_JSON_ENCODER = inertia_settings.INERTIA_JSON_ENCODER
 
 # STATIC
 # ------------------------------------------------------------------------------
@@ -149,7 +177,10 @@ STATIC_ROOT = str(BASE_DIR / "staticfiles")
 # https://docs.djangoproject.com/en/dev/ref/settings/#static-url
 STATIC_URL = "/static/"
 # https://docs.djangoproject.com/en/dev/ref/contrib/staticfiles/#std:setting-STATICFILES_DIRS
-STATICFILES_DIRS = [str(APPS_DIR / "static")]
+STATICFILES_DIRS = [
+    str(APPS_DIR / "static"),
+    DJANGO_VITE_ASSETS_PATH,
+]
 # https://docs.djangoproject.com/en/dev/ref/contrib/staticfiles/#staticfiles-finders
 STATICFILES_FINDERS = [
     "django.contrib.staticfiles.finders.FileSystemFinder",
@@ -162,6 +193,42 @@ STATICFILES_FINDERS = [
 MEDIA_ROOT = str(APPS_DIR / "media")
 # https://docs.djangoproject.com/en/dev/ref/settings/#media-url
 MEDIA_URL = "/media/"
+
+# S3 SETTINGS
+# ------------------------------------------------------------------------------
+if env.bool("USE_S3", default=False):
+    # AWS S3 Settings for django-storages
+    AWS_ACCESS_KEY_ID = env("DJANGO_AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY = env("DJANGO_AWS_SECRET_ACCESS_KEY")
+    AWS_STORAGE_BUCKET_NAME = env("DJANGO_AWS_STORAGE_BUCKET_NAME")
+    AWS_S3_REGION_NAME = env("DJANGO_AWS_S3_REGION_NAME")
+    AWS_S3_ENDPOINT_URL = env(
+        "DJANGO_AWS_S3_ENDPOINT_URL",
+        default=f"https://s3.{AWS_S3_REGION_NAME}.amazonaws.com",
+    )
+    AWS_S3_FILE_OVERWRITE = env.bool("DJANGO_AWS_S3_FILE_OVERWRITE", default=False)
+    AWS_DEFAULT_ACL = env("DJANGO_AWS_DEFAULT_ACL", default=None)
+    AWS_QUERYSTRING_EXPIRE = env.int("DJANGO_AWS_QUERYSTRING_EXPIRE", default=3600)
+
+    # Default File Storage
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+            "OPTIONS": {
+                "access_key": AWS_ACCESS_KEY_ID,
+                "secret_key": AWS_SECRET_ACCESS_KEY,
+                "bucket_name": AWS_STORAGE_BUCKET_NAME,
+                "region_name": AWS_S3_REGION_NAME,
+                "endpoint_url": AWS_S3_ENDPOINT_URL,
+                "file_overwrite": AWS_S3_FILE_OVERWRITE,
+                "default_acl": AWS_DEFAULT_ACL,
+                "querystring_expire": AWS_QUERYSTRING_EXPIRE,
+            },
+        },
+        "staticfiles": {
+            "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+        },
+    }
 
 # TEMPLATES
 # ------------------------------------------------------------------------------
@@ -286,5 +353,17 @@ SOCIALACCOUNT_FORMS = {"signup": "core.users.forms.UserSocialSignupForm"}
 INSTALLED_APPS += ["compressor"]
 STATICFILES_FINDERS += ["compressor.finders.CompressorFinder"]
 
+
 # Your stuff...
 # ------------------------------------------------------------------------------
+# http://whitenoise.evans.io/en/stable/django.html#WHITENOISE_IMMUTABLE_FILE_TEST
+def immutable_file_test(path, url):
+    # Match vite (rollup)-generated hashes, à la, `some_file-CSliV9zW.js`
+    return re.match(r"^.+[.-][0-9a-zA-Z_-]{8,12}\..+$", url)
+
+
+WHITENOISE_IMMUTABLE_FILE_TEST = immutable_file_test
+CSRF_HEADER_NAME = "CSRF_COOKIE"
+CSRF_COOKIE_NAME = "XSRF-TOKEN"
+
+APPEND_SLASH = True
